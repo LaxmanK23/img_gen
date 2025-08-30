@@ -10,6 +10,7 @@ To set up the environment, run the following commands:
 pip install --upgrade pip
 pip install torch torchvision torchaudio  # CPU build
 pip install diffusers transformers accelerate safetensors pillow
+pip install protobuf
 ```
 
 ## Requirements
