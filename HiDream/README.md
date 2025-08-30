@@ -21,3 +21,7 @@ pip install diffusers transformers accelerate safetensors pillow
 
 Refer to the project documentation for usage instructions.
 
+```bash
+python -m venv venv
+.\venv\Scripts\activate
+```

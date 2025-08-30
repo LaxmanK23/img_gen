@@ -1,0 +1,55 @@
+# Ignore Python cache and environment files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+venv/
+ENV/
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore data and log files
+*.log
+*.csv
+*.tsv
+*.dat
+*.db
+*.sqlite3
+
+# Ignore images and outputs
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+outputs/
+
+# Ignore model weights and checkpoints
+*.ckpt
+*.pt
+*.pth
+*.h5
+*.onnx
+
+# Ignore diffusers cache
+cache/
+
+# Ignore VS Code settings
+.vscode/
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore other common files
+*.bak
+*.tmp
+*.swp
+
+# Ignore git itself
+.git/
