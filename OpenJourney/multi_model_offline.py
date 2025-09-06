@@ -1,4 +1,4 @@
-# multi_model_generate.py
+# multi_model_offline.py
 import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
@@ -8,19 +8,24 @@ from PIL import Image
 
 # -------- CONFIG --------
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-FLAN_MODEL = "google/flan-t5-small"               # paraphrase/compress model
-CLIP_TOKENIZER = "openai/clip-vit-base-patch32"   # token counting
-# Put the 4 models you want here (change to whichever models you have/cached)
+
+# Paraphraser (optional) to shorten prompts for CLIP
+FLAN_MODEL = "google/flan-t5-small"
+CLIP_TOKENIZER = "openai/clip-vit-base-patch32"
+
+# Models to run — change to any models you have cached locally
 MODEL_IDS = [
-    "Prompthero/openjourney-v4",
     "runwayml/stable-diffusion-v1-5",
     "stabilityai/stable-diffusion-2-1",
-    "andite/anything-v4.0"
+    "Prompthero/openjourney-v4",
+    "andite/anything-v4.0",
 ]
+
+# Generation settings
 MAX_CLIP_TOKENS = 77
-LOCAL_ONLY = False  # Set True if you want to fail if models are not cached (offline mode)
+LOCAL_ONLY = True   # <-- Set True for strict offline (will error if model not cached). Set False for first-run downloads.
 OUTPUT_DIR = "multi_model_outputs"
-INIT_IMAGE_PATH = None  # Set to a path like "./input.png" to run img2img; or None for txt2img
+INIT_IMAGE_PATH = None  # "input.png" to enable img2img; or None for txt2img
 IMG2IMG_STRENGTH = 0.6
 NUM_INFERENCE_STEPS = 28
 NEGATIVE_PROMPT = "text, watermark, low-res, deformed, duplicate"
@@ -28,47 +33,43 @@ NEGATIVE_PROMPT = "text, watermark, low-res, deformed, duplicate"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# --- Load paraphraser (flan-t5) and CLIP tokenizer for token counting ---
-print("Loading flan-t5 paraphraser...")
+# --- Load paraphraser & CLIP tokenizer (for token counting) ---
+print("Loading paraphraser and CLIP tokenizer (local_only=%s)..." % LOCAL_ONLY)
 paraphraser_tok = AutoTokenizer.from_pretrained(FLAN_MODEL, local_files_only=LOCAL_ONLY)
 paraphraser = AutoModelForSeq2SeqLM.from_pretrained(FLAN_MODEL, local_files_only=LOCAL_ONLY).to(DEVICE)
-
-print("Loading CLIP tokenizer for token counting...")
 clip_tokenizer = CLIPTokenizerFast.from_pretrained(CLIP_TOKENIZER, local_files_only=LOCAL_ONLY)
 
 def clip_token_count(text: str) -> int:
     toks = clip_tokenizer(text, return_tensors="pt", padding=False, truncation=False)
     return toks.input_ids.shape[-1]
 
+# Simple T5 paraphrase/shorten helper (deterministic)
 def shorten_prompt(original_prompt: str, max_tokens: int = MAX_CLIP_TOKENS, max_passes: int = 2) -> str:
-    # Simple prompting for the T5 paraphraser (we call the model directly for deterministic output)
     from transformers import pipeline
     text2text = pipeline("text2text-generation", model=paraphraser, tokenizer=paraphraser_tok,
                          device=0 if DEVICE == "cuda" else -1)
     template = (
         f"Shorten the following image-generation prompt to fit within {max_tokens} CLIP tokens. "
-        "Keep the key visual details, style, scene. Drop verbosity and non-visual commentary.\n\n"
+        "Keep essential visual details (objects, placement, materials, style). Drop verbosity.\n\n"
         f"Original: '''{original_prompt}'''"
     )
     out = text2text(template, max_length=256, do_sample=False)[0]["generated_text"].strip()
     passes = 1
     while clip_token_count(out) > max_tokens and passes < max_passes:
         aggressive = (
-            "Aggressively compress while preserving only core visual elements (objects, placement, materials, style). "
+            "Aggressively compress while preserving core visual elements (objects, placement, materials, style). "
             f"Prompt: '''{out}'''"
         )
         out = text2text(aggressive, max_length=200, do_sample=False)[0]["generated_text"].strip()
         passes += 1
     if clip_token_count(out) > max_tokens:
-        # fallback hard truncate by tokens
         toks = clip_tokenizer(out, return_tensors="pt")["input_ids"][0].tolist()
         out = clip_tokenizer.decode(toks[:max_tokens], skip_special_tokens=True).strip()
     return out
 
-# --- Main loop to run each model ---
+# --- Model generation function ---
 def generate_for_model(model_id: str, prompt: str, out_name: str):
-    print(f"\nLoading image pipeline for model: {model_id} (this may be large)")
-    # Try to load an img2img pipeline if init image provided else txt2img
+    print(f"\nLoading pipeline for model: {model_id} (local_only={LOCAL_ONLY})")
     try:
         if INIT_IMAGE_PATH:
             pipe = StableDiffusionImg2ImgPipeline.from_pretrained(model_id, torch_dtype=torch.float32, local_files_only=LOCAL_ONLY)
@@ -79,23 +80,32 @@ def generate_for_model(model_id: str, prompt: str, out_name: str):
         return False
 
     pipe = pipe.to(DEVICE)
-    # optional: enable memory-efficient features if available
+    # memory helpers
     if hasattr(pipe, "enable_attention_slicing"):
         pipe.enable_attention_slicing()
-    # Generation args
+    if hasattr(pipe, "enable_model_cpu_offload"):
+        # optional: if installed with accelerate and available
+        try:
+            pipe.enable_model_cpu_offload()
+        except Exception:
+            pass
+
     gen_kwargs = dict(prompt=prompt, negative_prompt=NEGATIVE_PROMPT, num_inference_steps=NUM_INFERENCE_STEPS)
     if INIT_IMAGE_PATH:
         init_img = Image.open(INIT_IMAGE_PATH).convert("RGB")
         gen = pipe(init_image=init_img, strength=IMG2IMG_STRENGTH, **gen_kwargs)
     else:
         gen = pipe(**gen_kwargs)
+
     image = gen.images[0]
     save_path = os.path.join(OUTPUT_DIR, out_name)
     image.save(save_path)
     print("Saved ->", save_path)
+
     # free memory
     del pipe
-    torch.cuda.empty_cache() if DEVICE=="cuda" else None
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
     return True
 
 if __name__ == "__main__":
@@ -105,7 +115,6 @@ if __name__ == "__main__":
     print("Optimized prompt:", optimized)
     print("Optimized CLIP token count:", clip_token_count(optimized))
 
-    # loop models
     for idx, mid in enumerate(MODEL_IDS, start=1):
         safe_name = mid.replace("/", "_").replace(" ", "_")
         outfile = f"{idx:02d}_{safe_name}.png"
